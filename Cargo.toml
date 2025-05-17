@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "localchat_daemon",
+    "localchat_gui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.45.0", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "time"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter", "json"] }
+dirs = "6.0.0"
+mdns-sd = "0.13.9" # For daemon
+network-interface = "2.0.1" # For daemon
+rusqlite = { version = "0.35.0", features = ["bundled"] } # For daemon
+eframe = "0.31.1" # For GUI
+egui = "0.31.1" # For GUI
+crossbeam-channel = "0.5.15" # For GUI

@@ -1,0 +1,50 @@
+[package]
+name = "localchat_gui"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-channel = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+freedesktop-icons = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+clap = { version = "4.4.7", features = ["derive"] }
+notify-rust = "4"
+uuid = { version = "1.6", features = ["v4"] }
+
+[build-dependencies]
+# Needed for cargo bundle for macOS
+# cargo install cargo-bundle works too but this is better for CI
+# cargo-bundle = "0.6.0"
+
+# [[bin]]
+# name = "localchat_gui"
+# path = "src/main.rs"
+
+
+
+# Commentary for later:
+# For optimal performance, profile with `cargo flamegraph --unit-test -- FormattedPathDisplay_should_format_paths`
+# and then replace elided parts with `std::iter::once` to avoid allocations.
+#
+# Consider adding `console_error_panic_hook` for wasm builds debugging.
+#
+# For wasm builds use:
+#   RUSTFLAGS=--cfg=web_sys_unstable_apis cargo build --release --target wasm32-unknown-unknown
+#   wasm-bindgen target/wasm32-unknown-unknown/release/your_crate_name.wasm --out-dir static/pkg --no-typescript --target web
+#   Then serve with `miniserve static --index index.html -p 8080`
+
+# If you want to implement drag and drop of files onto the app you need to enable the "file-drop" feature for eframe.
+# This might also be useful for wasm if you want to upload files to the web app.
+# eframe = { version = "0.27.2", features = ["file-drop"] } 
