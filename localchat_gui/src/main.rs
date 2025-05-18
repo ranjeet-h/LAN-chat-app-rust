@@ -328,21 +328,11 @@ impl eframe::App for ChatApp {
         } else {
             // Only show the main UI if the username prompt is not active
             egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading("Local Network Chat");
-                    ui.separator();
-                    if ui.selectable_label(self.current_panel == CurrentPanel::Chat, "Chat").clicked() {
-                        self.current_panel = CurrentPanel::Chat;
-                    }
-                    if ui.selectable_label(self.current_panel == CurrentPanel::History, "History").clicked() {
-                        self.current_panel = CurrentPanel::History;
-                    }
-                    if ui.selectable_label(self.current_panel == CurrentPanel::Settings, "Settings").clicked() {
-                        self.current_panel = CurrentPanel::Settings;
-                    }
-                    ui.separator();
-                    ui.label(&self.ipc_connection_status); 
-                });
+                components::topnav::show(
+                    ui, 
+                    &mut self.current_panel, 
+                    &self.current_user_id
+                );
             });
 
             egui::SidePanel::left("side_panel").show(ctx, |ui| {
@@ -351,7 +341,8 @@ impl eframe::App for ChatApp {
                     &self.peers, 
                     &mut self.current_chat_peer_id,
                     &self.gui_to_daemon_tx, // Pass the sender
-                    &self.rt // Pass the Tokio runtime Arc
+                    &self.rt, // Pass the Tokio runtime Arc
+                    &self.current_user_id // Pass the current username
                 );
             });
 

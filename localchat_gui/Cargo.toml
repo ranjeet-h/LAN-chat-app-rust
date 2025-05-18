@@ -23,6 +23,21 @@ clap = { version = "4.4.7", features = ["derive"] }
 notify-rust = "4"
 uuid = { version = "1.6", features = ["v4"] }
 
+[package.metadata.bundle]
+name = "LocalNetworkChat"
+identifier = "com.yourdomain.localnetworkchat" # REPLACE with your actual domain in reverse
+icon = ["icons/icon.icns"] # Create this file or remove/comment out if no icon
+version = "0.1.0"
+resources = [] # You can add other resource files/directories here
+binaries = ["localchat_daemon"] # Add the daemon binary
+copyright = "Copyright Your Name 2024" # REPLACE with your copyright
+category = "Utility"
+short_description = "A local network chat application."
+long_description = """
+A simple chat application for local networks, built with Rust and egui.
+"""
+osx_minimum_system_version = "10.12" # Optional: set minimum macOS version
+
 [build-dependencies]
 # Needed for cargo bundle for macOS
 # cargo install cargo-bundle works too but this is better for CI

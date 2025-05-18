@@ -9,8 +9,25 @@ pub fn show(
     peers: &[IpcPeer], 
     current_chat_peer_id: &mut Option<String>,
     gui_to_daemon_tx: &Option<mpsc::Sender<GuiToDaemonCommand>>,
-    rt: &Arc<tokio::runtime::Runtime>
+    rt: &Arc<tokio::runtime::Runtime>,
+    current_user_id: &Option<String> // Added parameter for current username
 ) {
+    // Display current username in a styled section
+    // ui.add_space(5.0);
+    // ui.group(|ui| {
+    //     ui.horizontal(|ui| {
+    //         ui.label("Your Username: ");
+    //         if let Some(username) = current_user_id {
+    //             ui.strong(username);
+    //         } else {
+    //             ui.label(egui::RichText::new("Not set").weak());
+    //         }
+    //     });
+    // });
+    // ui.add_space(10.0);
+    // ui.separator();
+    // ui.add_space(5.0);
+    
     ui.horizontal(|ui| {
         ui.heading("Peers");
         if ui.button("🔃 Refresh").clicked() { // Unicode refresh symbol
