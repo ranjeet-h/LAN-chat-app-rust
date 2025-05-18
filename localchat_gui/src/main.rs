@@ -229,22 +229,42 @@ impl eframe::App for ChatApp {
                             println!("GUI: Received PeerList: {:?}", peers);
                             self.peers = peers;
                         }
-                        DaemonToGuiMessage::NewMessage(mut message) => {
-                            if Some(message.sender.clone()) == self.current_user_id {
-                                message.is_self = true;
+                        DaemonToGuiMessage::NewMessage(message) => { // message is already a full Message struct from daemon
+                            println!("GUI: NewMessage handler received: ID={}, Sender='{}', Content='{}', is_self (from daemon)={}, CurrentUserID='{:?}'",
+                                message.id, message.sender, message.content, message.is_self, self.current_user_id);
+                        
+                            // Any NewMessage from the daemon is considered a message from a foreign peer, as own messages are added locally
+                            // and the daemon is not expected to echo them back as NewMessage.
+                            // The daemon's handle_peer_tcp_connection already sets received_message.is_self = false.
+
+                            // We still check sender against current_user_id as a safeguard or if daemon logic changes.
+                            if self.current_user_id.as_ref().map_or(false, |uid| *uid == message.sender) {
+                                // This case implies an echo of our own message, which we typically don't expect here
+                                // if we've added it locally. If daemon *does* echo, this log helps.
+                                println!("GUI: Received NewMessage where sender ('{}') matches current_user_id ('{:?}'). ID: {}. This might be an unexpected echo. Ignoring.",
+                                    message.sender, self.current_user_id, message.id);
                             } else {
-                                message.is_self = false;
-                                // Show notification for incoming messages
-                                if let Err(e) = Notification::new()
-                                    .summary(&format!("New message from {}", message.sender))
-                                    .body(&message.content)
-                                    .icon("dialog-information") // You can try different stock icons
-                                    .appname("LocalChatGUI") // Added appname
-                                    .show() {
-                                    eprintln!("Error displaying notification: {}", e);
+                                // This is confirmed to be a message from another peer.
+                                // Add it to our list if its ID is not already present (to prevent daemon resend-duplicates).
+                                if !self.messages.iter().any(|m| m.id == message.id) {
+                                    println!("GUI: New foreign message (ID: {} from sender '{}'). Adding to list.", message.id, message.sender);
+                                    
+                                    if let Err(e) = Notification::new()
+                                        .summary(&format!("New message from {}", message.sender))
+                                        .body(&message.content)
+                                        .icon("dialog-information")
+                                        .appname("LocalChatGUI")
+                                        .show() {
+                                        eprintln!("Error displaying notification: {}", e);
+                                    }
+
+                                    let mut display_message = message; // clone the received message
+                                    display_message.is_self = false; // Ensure is_self is false for display purposes
+                                    self.messages.push(display_message);
+                                } else {
+                                    println!("GUI: Duplicate foreign message (ID: {} from sender '{}'). Not adding.", message.id, message.sender);
                                 }
                             }
-                            self.messages.push(message);
                         }
                         DaemonToGuiMessage::HistoryResponse { messages, .. } => {
                             self.messages.extend(messages);
@@ -286,20 +306,70 @@ impl eframe::App for ChatApp {
 
         // --- Username Prompt Modal ---
         if self.show_username_prompt {
-            egui::Window::new("Set Your Username")
+            let modal_width = 400.0;
+            let modal_height = 280.0;
+            
+            egui::Window::new("")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .collapsible(false)
                 .resizable(false)
+                .fixed_size([modal_width, modal_height])
+                .frame(egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(18, 18, 22))
+                    .corner_radius(16.0)
+                    .inner_margin(20.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 8,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(60),
+                    })
+                )
                 .show(ctx, |ui| {
-                    ui.vertical_centered_justified(|ui| {
-                        ui.label("Please enter a username to join the chat:");
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(20.0);
+                        ui.heading(
+                            egui::RichText::new("Set Your Username")
+                                .size(24.0)
+                                .color(egui::Color32::from_rgb(240, 240, 250))
+                                .strong()
+                        );
+                        
                         ui.add_space(10.0);
-                        let username_input_field = ui.add(
+                        ui.label(
+                            egui::RichText::new("Please enter a username to join the chat:")
+                                .size(16.0)
+                                .color(egui::Color32::from_rgb(200, 200, 210))
+                        );
+                        
+                        ui.add_space(30.0);        
+
+                        ui.add_sized(
+                            [modal_width - 80.0, 50.0],
                             egui::TextEdit::singleline(&mut self.username_input)
                                 .hint_text("Your Username")
+                                .frame(true)
+                                .margin(egui::vec2(8.0, 12.0))
+                                .text_color(egui::Color32::from_rgb(240, 240, 240))
+                                .font(egui::FontId::proportional(16.0))
+                                .horizontal_align(egui::Align::Center)
                         );
-                        ui.add_space(10.0);
-                        if ui.button("Set Username").clicked() || (username_input_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                        ui.add_space(30.0);
+                        
+                        // Styled button
+                        let button_bg = egui::Color32::from_rgb(25, 118, 210);
+                        if ui.add_sized(
+                            [modal_width - 80.0, 50.0],
+                            egui::Button::new(
+                                egui::RichText::new("Set Username")
+                                    .size(16.0)
+                                    .color(egui::Color32::WHITE)
+                                    .strong()
+                            )
+                            .fill(button_bg)
+                            .corner_radius(12.0)
+                            .stroke(egui::Stroke::NONE)
+                        ).clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.username_input.trim().is_empty()) {
                             if !self.username_input.trim().is_empty() {
                                 if let Some(tx) = &self.gui_to_daemon_tx {
                                     let command = GuiToDaemonCommand::SetUsername { username: self.username_input.trim().to_string() };
@@ -311,18 +381,19 @@ impl eframe::App for ChatApp {
                                             eprintln!("Failed to send SetUsername command: {}", e);
                                         }
                                     });
-                                    // self.show_username_prompt = false; // Optimistically hide, or wait for IdentityInfo
                                 } else {
                                     eprintln!("Error: gui_to_daemon_tx is None, cannot send SetUsername");
-                                    // Optionally, show an error to the user in the UI
                                 }
-                            } else {
-                                // Optionally, show an error if username is empty
-                                println!("Username cannot be empty");
                             }
                         }
-                        ui.add_space(5.0);
-                        ui.label("(This is required to discover and chat with others)");
+                        
+                        ui.add_space(20.0);
+                        ui.label(
+                            egui::RichText::new("(This is required to discover and chat with others)")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(160, 160, 180))
+                                .italics()
+                        );
                     });
                 });
         } else {
