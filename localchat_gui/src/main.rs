@@ -100,6 +100,7 @@ struct ChatApp {
     username_input: String, // Added for username prompt
     show_username_prompt: bool, // Added to control username prompt visibility
     username_file_path: Option<PathBuf>, // Added for instance-specific username file path
+    is_loading: bool, // Added to show a loader until identity is confirmed
     
     // IPC related fields
     rt: Arc<tokio::runtime::Runtime>,
@@ -230,6 +231,7 @@ impl ChatApp {
             username_input: loaded_username.clone(), // Use loaded username or empty
             show_username_prompt: initial_show_username_prompt, // Show prompt based on loaded status
             username_file_path: username_file_path_for_instance.clone(), // Store the passed path
+            is_loading: !initial_show_username_prompt, // If username loaded, start in loading state, else prompt will show first
             rt: rt_clone_for_app, 
             gui_to_daemon_tx: Some(gui_cmd_tx_clone_for_app), 
             daemon_to_gui_rx: daemon_to_gui_rx_arc,
@@ -320,6 +322,7 @@ impl eframe::App for ChatApp {
                             let old_id_log_display = self.current_user_id.as_deref().unwrap_or("None").to_string(); // Clone to avoid borrow issue
                             self.current_user_id = Some(user_id.clone());
                             self.show_username_prompt = false; // Hide prompt after getting identity
+                            self.is_loading = false; // Stop loading screen
                             println!("GUI: Received IdentityInfo, current_user_id set from '{}' to: {}", old_id_log_display, user_id);
                             
                             // Request peers once after identity is confirmed and if not already requested
@@ -347,7 +350,7 @@ impl eframe::App for ChatApp {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
-        // --- Username Prompt Modal ---
+        // --- Username Prompt Modal --- / Loading State --- / Main UI ---
         if self.show_username_prompt {
             let modal_width = 400.0;
             let modal_height = 280.0;
@@ -418,22 +421,26 @@ impl eframe::App for ChatApp {
                                     let command = GuiToDaemonCommand::SetUsername { username: self.username_input.trim().to_string() };
                                     let tx_clone = tx.clone();
                                     let username_to_save = self.username_input.trim().to_string(); // for logging & saving
+                                    let username_for_async_block = username_to_save.clone(); // Clone for the async block
                                     self.rt.spawn(async move {
-                                        println!("GUI: Sending SetUsername command with username: {}", username_to_save);
+                                        println!("GUI: Sending SetUsername command with username: {}", username_for_async_block);
                                         if let Err(e) = tx_clone.send(command).await {
                                             eprintln!("Failed to send SetUsername command: {}", e);
                                         }
                                     });
                                     // Save the username
-                                    if let Some(ref path) = self.username_file_path {
-                                        if let Err(e) = std::fs::write(path, self.username_input.trim()) {
+                                    if let Some(ref path) = self.username_file_path { 
+                                        if let Err(e) = std::fs::write(path, username_to_save.as_bytes()) { 
                                             eprintln!("Failed to save username to file {:?}: {}", path, e);
                                         } else {
-                                            println!("GUI: Saved username '{}' to file {:?}.", self.username_input.trim(), path);
+                                            println!("GUI: Saved username '{}' to file {:?}.", username_to_save, path);
                                         }
                                     } else {
                                         eprintln!("Failed to determine instance-specific username file path to save username.");
                                     }
+                                    // After attempting to send and save, hide prompt and show loader
+                                    self.show_username_prompt = false;
+                                    self.is_loading = true; 
                                 } else {
                                     eprintln!("Error: gui_to_daemon_tx is None, cannot send SetUsername");
                                 }
@@ -449,8 +456,15 @@ impl eframe::App for ChatApp {
                         );
                     });
                 });
+        } else if self.is_loading {
+            // --- Loading State ---
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.add(egui::Spinner::new().size(50.0));
+                });
+            });
         } else {
-            // Only show the main UI if the username prompt is not active
+            // Only show the main UI if the username prompt is not active and not loading
             egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
                 components::topnav::show(
                     ui, 

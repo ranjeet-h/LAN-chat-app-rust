@@ -72,7 +72,7 @@ pub struct Message {
 #[derive(Debug, Clone)]
 struct UserIdentity {
     user_provided_name: String, // Raw name from GUI, e.g., "My Cool Name"
-    mdns_instance_name: String, // Sanitized & suffixed for mDNS, e.g., "MyCoolName_a1b2c3d4"
+    m_dns_instance_name: String, // Sanitized & suffixed for mDNS, e.g., "MyCoolName_a1b2c3d4"
     full_message_id: String,    // Used in messages and for GUI display, e.g., "My Cool Name - a1b2c3d4"
 }
 
@@ -365,7 +365,7 @@ async fn handle_gui_connection(
                                                 .chars()
                                                 .filter(|c| c.is_alphanumeric())
                                                 .collect::<String>();
-                                            let mdns_instance_name = format!("{}_{}", 
+                                            let m_dns_instance_name = format!("{}_{}", 
                                                 if sanitized_username_for_mdns.is_empty() { "LocalChat" } else { &sanitized_username_for_mdns }, 
                                                 suffix
                                             );
@@ -373,12 +373,12 @@ async fn handle_gui_connection(
 
                                             *identity_guard = Some(UserIdentity {
                                                 user_provided_name: username.clone(),
-                                                mdns_instance_name: mdns_instance_name.clone(),
+                                                m_dns_instance_name: m_dns_instance_name.clone(),
                                                 full_message_id: full_message_id.clone(),
                                             });
                                             drop(identity_guard); // Release lock before async operations
 
-                                            tracing::info!("User identity set: Full ID = '{}', mDNS Name = '{}'", full_message_id, mdns_instance_name);
+                                            tracing::info!("User identity set: Full ID = '{}', mDNS Name = '{}'", full_message_id, m_dns_instance_name);
 
                                             // Spawn mDNS initialization
                                             let mdns_daemon_clone = mdns_daemon.clone();
@@ -479,7 +479,7 @@ async fn handle_gui_connection(
 
 async fn initialize_mdns_and_register(
     mdns_daemon: Arc<ServiceDaemon>,
-    user_identity_arc: Arc<Mutex<Option<UserIdentity>>>, // To read the generated mdns_instance_name and full_message_id
+    user_identity_arc: Arc<Mutex<Option<UserIdentity>>>, // To read the generated m_dns_instance_name and full_message_id
     peers_map: Arc<Mutex<HashMap<String, IpcPeer>>>,
     daemon_tcp_port: u16,
     // active_gui_tx: Arc<Mutex<Option<mpsc::Sender<DaemonToGuiMessage>>>>, // For sending updates to this specific GUI.
@@ -499,8 +499,8 @@ async fn initialize_mdns_and_register(
     let (host_ip, iface_name) = get_local_ip_and_interface_name()
         .unwrap_or_else(|| (IpAddr::V4("0.0.0.0".parse().unwrap()), "DefaultIface".to_string()));
 
-    // Use mdns_instance_name for the service instance field, and full_message_id for TXT record
-    let mDNS_instance_name = &current_identity.mdns_instance_name;
+    // Use m_dns_instance_name for the service instance field, and full_message_id for TXT record
+    let m_dns_instance_name = &current_identity.m_dns_instance_name;
 
     // Sanitize interface name to create a valid hostname component
     let mut sanitized_hostname_component = iface_name
@@ -515,7 +515,7 @@ async fn initialize_mdns_and_register(
     }
     let service_host_fqdn = format!("{}.local.", sanitized_hostname_component);
 
-    let own_full_registered_name_for_check = format!("{}.{}", mDNS_instance_name, MDNS_SERVICE_TYPE);
+    let own_full_registered_name_for_check = format!("{}.{}", m_dns_instance_name, MDNS_SERVICE_TYPE);
 
     let mut txt_records = HashMap::new();
     txt_records.insert("username".to_string(), current_identity.user_provided_name.clone()); // The human-readable name
@@ -523,11 +523,11 @@ async fn initialize_mdns_and_register(
     txt_records.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
 
     tracing::info!("Registering mDNS service: Instance Name='{}', User Provided='{}', Full ID='{}', Host='{}', Port={}", 
-        mDNS_instance_name, current_identity.user_provided_name.clone(), current_identity.full_message_id.clone(), service_host_fqdn.clone(), daemon_tcp_port);
+        m_dns_instance_name, current_identity.user_provided_name.clone(), current_identity.full_message_id.clone(), service_host_fqdn.clone(), daemon_tcp_port);
 
     let service_info = ServiceInfo::new(
         MDNS_SERVICE_TYPE,
-        mDNS_instance_name,       // Instance name (e.g., "MyFriendlyName_suffix")
+        m_dns_instance_name,       // Instance name (e.g., "MyFriendlyName_suffix")
         &service_host_fqdn,       // Host FQDN (e.g., "mymachine.local.") - pass as borrow
         host_ip,
         daemon_tcp_port,
@@ -541,7 +541,7 @@ async fn initialize_mdns_and_register(
         tracing::error!("Failed to register mDNS service: {}", e);
         Box::new(e) as Box<dyn Error>
     })?;
-    tracing::info!("Registered mDNS service: '{}' on type {}", mDNS_instance_name, MDNS_SERVICE_TYPE);
+    tracing::info!("Registered mDNS service: '{}' on type {}", m_dns_instance_name, MDNS_SERVICE_TYPE);
 
     let browser = mdns_daemon.browse(MDNS_SERVICE_TYPE).map_err(|e| {
         tracing::error!("Failed to start mDNS browser: {}", e);
@@ -549,7 +549,7 @@ async fn initialize_mdns_and_register(
     })?;
     let peers_map_mdns_clone = peers_map.clone();
     // own_full_name_check was <Instance>.<Domain> = <instance_name>.<iface_name.replace(" ", "_")>.local.
-    // Now it should be <mDNS_instance_name>.<MDNS_SERVICE_TYPE> for the check
+    // Now it should be <m_dns_instance_name>.<MDNS_SERVICE_TYPE> for the check
     // This is what ServiceEvent::ServiceResolved(info).get_fullname() returns.
     let own_fullname_check = own_full_registered_name_for_check.clone();
 
@@ -616,7 +616,7 @@ async fn initialize_mdns_and_register(
                             // First, find the key that needs to be removed without holding up the iteration
                             let instance_part_of_removed_fullname = fullname.split('.').next().unwrap_or_default();
                             for (id_key, ipc_peer) in peers_guard.iter() {
-                                 // This is a heuristic. A better way is to store the mdns_instance_name in IpcPeer.
+                                 // This is a heuristic. A better way is to store the m_dns_instance_name in IpcPeer.
                                 if ipc_peer.username.starts_with(instance_part_of_removed_fullname) || 
                                    id_key.contains(instance_part_of_removed_fullname) { // Assuming id_key is full_message_id
                                     key_identified_for_removal = Some(id_key.clone());
