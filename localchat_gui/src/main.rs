@@ -12,6 +12,8 @@ use tokio_util::codec::{FramedRead, LinesCodec}; // For reading lines from UnixS
 use futures::stream::StreamExt; // For stream.next()
 use clap::Parser; // Added for CLI argument parsing
 use notify_rust::Notification; // Added for desktop notifications
+use home; // Added for persisting username
+use std::path::PathBuf; // Added for instance-specific username file path
 
 mod components; // Added to use the components module
 
@@ -97,6 +99,7 @@ struct ChatApp {
     current_user_id: Option<String>, // Changed to Option<String>
     username_input: String, // Added for username prompt
     show_username_prompt: bool, // Added to control username prompt visibility
+    username_file_path: Option<PathBuf>, // Added for instance-specific username file path
     
     // IPC related fields
     rt: Arc<tokio::runtime::Runtime>,
@@ -107,17 +110,40 @@ struct ChatApp {
 }
 
 impl ChatApp {
-    fn new(_cc: &eframe::CreationContext<'_>, daemon_socket_path_for_instance: String) -> Self {
+    fn new(
+        _cc: &eframe::CreationContext<'_>, 
+        daemon_socket_path_for_instance: String,
+        username_file_path_for_instance: Option<PathBuf> // Added new parameter
+    ) -> Self {
         let rt = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
         let (daemon_to_gui_tx, daemon_to_gui_rx_local) = mpsc::channel::<DaemonToGuiMessage>(32);
         let daemon_to_gui_rx_arc = Arc::new(TokioMutex::new(Some(daemon_to_gui_rx_local)));
 
-        // Placeholder for the sender half of the GUI -> Daemon command channel
-        // This will be properly initialized once the IPC task is fully designed for two-way comms.
         let (gui_cmd_tx, mut gui_cmd_rx) = mpsc::channel::<GuiToDaemonCommand>(32);
-
-        // Clone for the IPC task
         let task_socket_path = daemon_socket_path_for_instance.clone();
+
+        // Attempt to load username from file
+        let mut loaded_username = String::new();
+        let mut initial_show_username_prompt = true;
+        // let username_file_path = home::home_dir().map(|mut path| { // OLD: Will be replaced by using the parameter
+        //     path.push(".localchat_gui_username");
+        //     path
+        // });
+
+        if let Some(ref path) = username_file_path_for_instance { // Use the passed parameter
+            if let Ok(username_from_file) = std::fs::read_to_string(path) {
+                let trimmed_username = username_from_file.trim();
+                if !trimmed_username.is_empty() {
+                    loaded_username = trimmed_username.to_string();
+                    initial_show_username_prompt = false;
+                    println!("GUI: Loaded username '{}' from file: {:?}", loaded_username, path);
+                }
+            }
+        }
+
+        // Clone rt and gui_cmd_tx for the app instance *before* rt is moved into the IPC task
+        let rt_clone_for_app = rt.clone();
+        let gui_cmd_tx_clone_for_app = gui_cmd_tx.clone();
 
         rt.spawn(async move {
             // Connection loop is the same as before
@@ -193,7 +219,7 @@ impl ChatApp {
             }
         });
 
-        Self {
+        let mut app = Self {
             message_input: String::new(),
             messages: Vec::new(),
             current_panel: CurrentPanel::Chat,
@@ -201,14 +227,31 @@ impl ChatApp {
             daemon_status: None,
             current_chat_peer_id: None,
             current_user_id: None, // Initialized to None
-            username_input: String::new(), // Initialized empty
-            show_username_prompt: true, // Show prompt by default
-            rt,
-            gui_to_daemon_tx: Some(gui_cmd_tx), // Store the sender for GUI commands
+            username_input: loaded_username.clone(), // Use loaded username or empty
+            show_username_prompt: initial_show_username_prompt, // Show prompt based on loaded status
+            username_file_path: username_file_path_for_instance.clone(), // Store the passed path
+            rt: rt_clone_for_app, 
+            gui_to_daemon_tx: Some(gui_cmd_tx_clone_for_app), 
             daemon_to_gui_rx: daemon_to_gui_rx_arc,
             ipc_connection_status: "Connecting...".to_string(),
             requested_initial_peers: false, // Initialize flag
+        };
+
+        // If username was loaded, send it to the daemon
+        if !initial_show_username_prompt {
+            if let Some(tx) = &app.gui_to_daemon_tx {
+                let command = GuiToDaemonCommand::SetUsername { username: loaded_username.clone() };
+                let tx_clone = tx.clone();
+                let username_to_send = loaded_username.clone(); // Clone for the async block
+                app.rt.spawn(async move {
+                    println!("GUI: Sending pre-loaded username '{}' to daemon.", username_to_send);
+                    if let Err(e) = tx_clone.send(command).await {
+                        eprintln!("Failed to send pre-loaded SetUsername command: {}", e);
+                    }
+                });
+            }
         }
+        app
     }
 }
 
@@ -374,13 +417,23 @@ impl eframe::App for ChatApp {
                                 if let Some(tx) = &self.gui_to_daemon_tx {
                                     let command = GuiToDaemonCommand::SetUsername { username: self.username_input.trim().to_string() };
                                     let tx_clone = tx.clone();
-                                    let username_clone = self.username_input.trim().to_string(); // for logging
+                                    let username_to_save = self.username_input.trim().to_string(); // for logging & saving
                                     self.rt.spawn(async move {
-                                        println!("GUI: Sending SetUsername command with username: {}", username_clone);
+                                        println!("GUI: Sending SetUsername command with username: {}", username_to_save);
                                         if let Err(e) = tx_clone.send(command).await {
                                             eprintln!("Failed to send SetUsername command: {}", e);
                                         }
                                     });
+                                    // Save the username
+                                    if let Some(ref path) = self.username_file_path {
+                                        if let Err(e) = std::fs::write(path, self.username_input.trim()) {
+                                            eprintln!("Failed to save username to file {:?}: {}", path, e);
+                                        } else {
+                                            println!("GUI: Saved username '{}' to file {:?}.", self.username_input.trim(), path);
+                                        }
+                                    } else {
+                                        eprintln!("Failed to determine instance-specific username file path to save username.");
+                                    }
                                 } else {
                                     eprintln!("Error: gui_to_daemon_tx is None, cannot send SetUsername");
                                 }
@@ -444,8 +497,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     println!("GUI Instance: {}", args.instance);
 
-    let daemon_tcp_port_for_instance = 12345 + (args.instance - 1); // e.g., 12345 for instance 1, 12346 for instance 2
+    let daemon_tcp_port_for_instance = 12345 + (args.instance - 1);
     let daemon_socket_path_for_instance = format!("/tmp/localchat_daemon{}.sock", args.instance);
+
+    // Construct instance-specific username file path
+    let username_file_path_for_instance = home::home_dir().map(|mut path| {
+        path.push(format!(".localchat_gui_username_{}", args.instance));
+        path
+    });
 
     let mut daemon_command = Command::new("");
 
@@ -503,7 +562,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     eframe::run_native(
         &format!("Local Chat GUI - Instance {}", args.instance), // Unique window title
         options,
-        Box::new(move |cc| Ok(Box::new(ChatApp::new(cc, app_socket_path)))), // Pass socket path
+        Box::new(move |cc| Ok(Box::new(ChatApp::new(cc, app_socket_path, username_file_path_for_instance)))), // Pass new path
     ).map_err(|e| Box::new(e) as Box<dyn Error>)?;
     Ok(())
 }

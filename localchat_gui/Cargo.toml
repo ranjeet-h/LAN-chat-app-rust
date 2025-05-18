@@ -22,6 +22,7 @@ futures = "0.3"
 clap = { version = "4.4.7", features = ["derive"] }
 notify-rust = "4"
 uuid = { version = "1.6", features = ["v4"] }
+home = "0.2"
 
 [package.metadata.bundle]
 name = "LocalNetworkChat"
