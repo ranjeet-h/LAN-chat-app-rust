@@ -100,6 +100,7 @@ pub fn show(
         // Scrollable area with improved styling
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .id_source("peer_list_scroll_area")
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0; // Tighter spacing between items
                 
@@ -203,28 +204,28 @@ pub fn show(
     }
     
     // Bottom section with connection info or status
-    ui.add_space(8.0);
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
+    // ui.add_space(8.0);
+    // ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+    //     ui.add_space(8.0);
+    //     ui.separator();
+    //     ui.add_space(8.0);
         
-        // Show current user info at bottom
-        if let Some(username) = current_user_id {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(
-                    egui::RichText::new("Logged in as:")
-                        .size(11.0)
-                        .color(subtle_color)
-                );
-                ui.label(
-                    egui::RichText::new(username)
-                        .size(11.0)
-                        .color(label_color)
-                        .strong()
-                );
-            });
-        }
-    });
+    //     // Show current user info at bottom
+    //     if let Some(username) = current_user_id {
+    //         ui.horizontal(|ui| {
+    //             ui.spacing_mut().item_spacing.x = 4.0;
+    //             ui.label(
+    //                 egui::RichText::new("Logged in as:")
+    //                     .size(11.0)
+    //                     .color(subtle_color)
+    //             );
+    //             ui.label(
+    //                 egui::RichText::new(username)
+    //                     .size(11.0)
+    //                     .color(label_color)
+    //                     .strong()
+    //             );
+    //         });
+    //     }
+    // });
 } 

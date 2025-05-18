@@ -38,6 +38,7 @@ pub enum GuiToDaemonCommand {
         since_timestamp: Option<chrono::DateTime<chrono::Utc>>,
     },
     SetUsername { username: String }, // New command
+    ClearDaemonPeerCache, // Added command
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +70,7 @@ pub struct Message {
 // --- End IPC Structures ---
 
 // Represents the various identifiers for the current daemon instance once username is set
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserIdentity {
     user_provided_name: String, // Raw name from GUI, e.g., "My Cool Name"
     m_dns_instance_name: String, // Sanitized & suffixed for mDNS, e.g., "MyCoolName_a1b2c3d4"
@@ -122,6 +123,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let daemon_tcp_port = get_daemon_tcp_port();
     let daemon_socket_path = get_daemon_socket_path();
 
+    // Determine instance number for unique identity file path
+    // This is a bit of a hack, assuming socket path contains instance like /tmp/localchat_daemon<N>.sock
+    let instance_number_str = daemon_socket_path
+        .chars()
+        .filter(|c| c.is_digit(10))
+        .collect::<String>();
+    let instance_number = instance_number_str.parse::<u16>().unwrap_or(0); // Default to 0 if not found
+
+    let identity_file_path = format!("/tmp/localchat_daemon_identity_{}.json", instance_number);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -151,7 +162,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let peers_map: Arc<Mutex<HashMap<String, IpcPeer>>> = Arc::new(Mutex::new(HashMap::new()));
     let active_gui_tx: Arc<Mutex<Option<mpsc::Sender<DaemonToGuiMessage>>>> = Arc::new(Mutex::new(None));
-    let user_identity: Arc<Mutex<Option<UserIdentity>>> = Arc::new(Mutex::new(None)); // New state for identity
+    
+    // Attempt to load persistent UserIdentity
+    let mut loaded_identity: Option<UserIdentity> = None;
+    if Path::new(&identity_file_path).exists() {
+        match std::fs::read_to_string(&identity_file_path) {
+            Ok(identity_json) => {
+                match serde_json::from_str::<UserIdentity>(&identity_json) {
+                    Ok(id) => {
+                        tracing::info!("Successfully loaded persistent UserIdentity from {}: {:?}", identity_file_path, id);
+                        loaded_identity = Some(id);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to deserialize UserIdentity from {}: {}. Will generate new one.", identity_file_path, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to read UserIdentity file {}: {}. Will generate new one.", identity_file_path, e);
+            }
+        }
+    }
+
+    let user_identity: Arc<Mutex<Option<UserIdentity>>> = Arc::new(Mutex::new(loaded_identity));
 
     // --- mDNS Setup (daemon only, registration deferred) ---
     let mdns_daemon = match ServiceDaemon::new() {
@@ -183,6 +216,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // let current_instance_name_clone = instance_name_ipc_clone.clone(); // Old
                     let current_user_identity_clone = user_identity_ipc_clone.clone();
                     let current_mdns_daemon_clone = mdns_daemon_ipc_clone.clone(); 
+                    let identity_file_path_clone = identity_file_path.clone(); // Clone for handler
 
                     let (to_gui_sender, to_gui_receiver) = mpsc::channel::<DaemonToGuiMessage>(32);
                     *active_gui_tx_ipc_clone.lock().await = Some(to_gui_sender);
@@ -200,7 +234,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             current_user_identity_clone, 
                             current_mdns_daemon_clone, 
                             daemon_tcp_port, 
-                            active_gui_tx_for_mDNS // To be used by mDNS setup
+                            active_gui_tx_for_mDNS, // To be used by mDNS setup
+                            identity_file_path_clone // Pass identity file path
                         ).await;
                     });
                 }
@@ -305,7 +340,8 @@ async fn handle_gui_connection(
     user_identity_arc: Arc<Mutex<Option<UserIdentity>>>,
     mdns_daemon: Arc<ServiceDaemon>,
     daemon_tcp_port: u16,
-    active_gui_tx_for_mDNS: Arc<Mutex<Option<mpsc::Sender<DaemonToGuiMessage>>>>
+    active_gui_tx_for_mDNS: Arc<Mutex<Option<mpsc::Sender<DaemonToGuiMessage>>>>,
+    identity_file_path: String
 ) {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut buf_reader = BufReader::new(reader);
@@ -348,73 +384,88 @@ async fn handle_gui_connection(
                                     GuiToDaemonCommand::SetUsername { username } => {
                                         tracing::info!("Processing SetUsername from GUI: {}", username);
                                         let mut identity_guard = user_identity_arc.lock().await;
-                                        if identity_guard.is_some() {
-                                            tracing::warn!("Username already set. Ignoring SetUsername command.");
-                                            let err_response = DaemonToGuiMessage::Error("Username already set.".to_string());
-                                            if let Ok(json_err) = serde_json::to_string(&err_response) {
-                                                if writer.write_all(format!("{}\n", json_err).as_bytes()).await.is_err() { break; }
+                                        let mut rng = rand::thread_rng();
+                                        let suffix: String = rng.sample_iter(&rand::distributions::Alphanumeric)
+                                            .take(8)
+                                            .map(char::from)
+                                            .collect();
+                                        
+                                        let sanitized_username_for_mdns = username
+                                            .chars()
+                                            .filter(|c| c.is_alphanumeric())
+                                            .collect::<String>();
+                                        let m_dns_instance_name = format!("{}_{}", 
+                                            if sanitized_username_for_mdns.is_empty() { "LocalChat" } else { &sanitized_username_for_mdns }, 
+                                            suffix
+                                        );
+                                        let full_message_id = format!("{} - {}", username, suffix);
+
+                                        let new_identity = UserIdentity {
+                                            user_provided_name: username.clone(),
+                                            m_dns_instance_name: m_dns_instance_name.clone(),
+                                            full_message_id: full_message_id.clone(),
+                                        };
+                                        *identity_guard = Some(new_identity.clone()); // Store in memory
+                                        drop(identity_guard); // Release lock before async operations
+
+                                        // Save the new identity to file
+                                        match serde_json::to_string_pretty(&new_identity) {
+                                            Ok(identity_json) => {
+                                                if let Err(e) = std::fs::write(&identity_file_path, identity_json) {
+                                                    tracing::error!("Failed to save UserIdentity to {}: {}", identity_file_path, e);
+                                                } else {
+                                                    tracing::info!("Successfully saved UserIdentity to {}", identity_file_path);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to serialize UserIdentity for saving: {}", e);
+                                            }
+                                        }
+
+                                        tracing::info!("User identity set/updated: Full ID = '{}', mDNS Name = '{}'", full_message_id, m_dns_instance_name);
+
+                                        // Spawn mDNS initialization (this will re-register if needed)
+                                        let mdns_daemon_clone = mdns_daemon.clone();
+                                        let user_identity_clone_for_mdns = user_identity_arc.clone();
+                                        let peers_map_clone_for_mdns = peers_map.clone();
+                                        tokio::spawn(async move {
+                                            tracing::info!("Spawning mDNS initialization/update task...");
+                                            if let Err(e) = initialize_mdns_and_register(
+                                                mdns_daemon_clone,
+                                                user_identity_clone_for_mdns,
+                                                peers_map_clone_for_mdns,
+                                                daemon_tcp_port
+                                            ).await {
+                                                tracing::error!("mDNS initialization/update failed: {}", e);
+                                                // Notify GUI of mDNS failure? (Consider adding this through active_gui_tx_arc)
+                                            }
+                                        });
+
+                                        // Send IdentityInfo back to GUI
+                                        let identity_msg = DaemonToGuiMessage::IdentityInfo { user_id: full_message_id };
+                                        if let Ok(json_msg) = serde_json::to_string(&identity_msg) {
+                                            tracing::info!("Sending IdentityInfo to GUI: {}", json_msg);
+                                            if writer.write_all(format!("{}\n", json_msg).as_bytes()).await.is_err() { 
+                                                tracing::warn!("Failed to send IdentityInfo to GUI");
+                                                break; 
                                             }
                                         } else {
-                                            let mut rng = rand::thread_rng();
-                                            let suffix: String = rng.sample_iter(&rand::distributions::Alphanumeric)
-                                                .take(8)
-                                                .map(char::from)
-                                                .collect();
-                                            
-                                            let sanitized_username_for_mdns = username
-                                                .chars()
-                                                .filter(|c| c.is_alphanumeric())
-                                                .collect::<String>();
-                                            let m_dns_instance_name = format!("{}_{}", 
-                                                if sanitized_username_for_mdns.is_empty() { "LocalChat" } else { &sanitized_username_for_mdns }, 
-                                                suffix
-                                            );
-                                            let full_message_id = format!("{} - {}", username, suffix);
-
-                                            *identity_guard = Some(UserIdentity {
-                                                user_provided_name: username.clone(),
-                                                m_dns_instance_name: m_dns_instance_name.clone(),
-                                                full_message_id: full_message_id.clone(),
-                                            });
-                                            drop(identity_guard); // Release lock before async operations
-
-                                            tracing::info!("User identity set: Full ID = '{}', mDNS Name = '{}'", full_message_id, m_dns_instance_name);
-
-                                            // Spawn mDNS initialization
-                                            let mdns_daemon_clone = mdns_daemon.clone();
-                                            let user_identity_clone_for_mdns = user_identity_arc.clone();
-                                            let peers_map_clone_for_mdns = peers_map.clone();
-                                            tokio::spawn(async move {
-                                                tracing::info!("Spawning mDNS initialization task...");
-                                                if let Err(e) = initialize_mdns_and_register(
-                                                    mdns_daemon_clone,
-                                                    user_identity_clone_for_mdns,
-                                                    peers_map_clone_for_mdns,
-                                                    daemon_tcp_port,
-                                                    // active_gui_tx_for_mDNS.clone() // Pass if mDNS needs to send to GUI
-                                                ).await {
-                                                    tracing::error!("mDNS initialization failed: {}", e);
-                                                    // Notify GUI of mDNS failure?
-                                                    let err_msg = DaemonToGuiMessage::Error(format!("mDNS failed to start: {}", e));
-                                                    if let Ok(json_err) = serde_json::to_string(&err_msg) {
-                                                        // Need writer here, or send through active_gui_tx_arc
-                                                        // This task doesn't have direct access to writer. 
-                                                        // Best to send through active_gui_tx_arc if GUI needs this error.
-                                                    }
-                                                }
-                                            });
-
-                                            // Send IdentityInfo back to GUI
-                                            let identity_msg = DaemonToGuiMessage::IdentityInfo { user_id: full_message_id };
-                                            if let Ok(json_msg) = serde_json::to_string(&identity_msg) {
-                                                tracing::info!("Sending IdentityInfo to GUI: {}", json_msg);
-                                                if writer.write_all(format!("{}\n", json_msg).as_bytes()).await.is_err() { 
-                                                    tracing::warn!("Failed to send IdentityInfo to GUI");
-                                                    break; // Break select loop, will close connection
-                                                }
-                                            } else {
-                                                tracing::error!("Failed to serialize IdentityInfo for GUI");
+                                            tracing::error!("Failed to serialize IdentityInfo for GUI");
+                                        }
+                                    }
+                                    GuiToDaemonCommand::ClearDaemonPeerCache => {
+                                        let mut peers = peers_map.lock().await;
+                                        peers.clear();
+                                        tracing::info!("Daemon peer cache cleared at GUI request.");
+                                        let response = DaemonToGuiMessage::Success("Daemon peer cache cleared.".to_string());
+                                        if let Ok(json_response) = serde_json::to_string(&response) {
+                                            tracing::debug!("Sending to GUI (command response): {}", json_response);
+                                            if writer.write_all(format!("{}\n", json_response).as_bytes()).await.is_err() {
+                                                tracing::warn!("Failed to send command response to GUI: {}", trimmed_line);
+                                                break; 
                                             }
+                                        } else {
+                                            tracing::error!("Failed to serialize command response for GUI");
                                         }
                                     }
                                     _ => { // Other commands (GetPeers, SendMessage, RequestHistory)
@@ -479,11 +530,9 @@ async fn handle_gui_connection(
 
 async fn initialize_mdns_and_register(
     mdns_daemon: Arc<ServiceDaemon>,
-    user_identity_arc: Arc<Mutex<Option<UserIdentity>>>, // To read the generated m_dns_instance_name and full_message_id
+    user_identity_arc: Arc<Mutex<Option<UserIdentity>>>, 
     peers_map: Arc<Mutex<HashMap<String, IpcPeer>>>,
-    daemon_tcp_port: u16,
-    // active_gui_tx: Arc<Mutex<Option<mpsc::Sender<DaemonToGuiMessage>>>>, // For sending updates to this specific GUI.
-                                                                        // Simpler: mDNS updates peers_map, GUI uses GetPeers.
+    daemon_tcp_port: u16
 ) -> Result<(), Box<dyn Error>> {
     let identity_guard = user_identity_arc.lock().await;
     let current_identity = match identity_guard.as_ref() {
@@ -658,8 +707,6 @@ async fn process_gui_command(
 ) -> DaemonToGuiMessage {
     match command {
         GuiToDaemonCommand::SetUsername { .. } => {
-            // This is handled directly in handle_gui_connection now
-            // Should not reach here if logic is correct, but as a safeguard:
             tracing::warn!("SetUsername command unexpectedly reached process_gui_command.");
             DaemonToGuiMessage::Error("SetUsername should be handled internally by connection handler.".to_string())
         }
@@ -668,6 +715,12 @@ async fn process_gui_command(
             let peer_list: Vec<IpcPeer> = peers.values().cloned().collect();
             tracing::info!("Responding to GetPeers with {} peers", peer_list.len());
             DaemonToGuiMessage::PeerList(peer_list)
+        }
+        GuiToDaemonCommand::ClearDaemonPeerCache => { 
+            let mut peers = peers_map.lock().await;
+            peers.clear();
+            tracing::info!("Daemon peer cache cleared at GUI request.");
+            DaemonToGuiMessage::Success("Daemon peer cache cleared.".to_string())
         }
         GuiToDaemonCommand::SendMessage { ref recipient_id, ref content } => { 
             let identity_guard = user_identity_arc.lock().await;

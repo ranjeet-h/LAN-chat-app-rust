@@ -37,6 +37,7 @@ pub enum GuiToDaemonCommand {
         since_timestamp: Option<chrono::DateTime<chrono::Utc>>,
     },
     SetUsername { username: String }, // Added command
+    ClearDaemonPeerCache, // Added command to tell daemon to clear its peer list
     // Add other commands as needed (e.g., set username, status updates)
 }
 
@@ -81,6 +82,17 @@ type GuiToDaemonTx = mpsc::Sender<GuiToDaemonCommand>;
 // Channel for receiving messages/events from Daemon to GUI
 type DaemonToGuiRx = mpsc::Receiver<DaemonToGuiMessage>;
 
+// State for the settings panel
+struct SettingsState {
+    edit_username_input: String,
+}
+
+impl SettingsState {
+    fn new() -> Self {
+        Self { edit_username_input: String::new() }
+    }
+}
+
 // Define CLI arguments
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -101,6 +113,7 @@ struct ChatApp {
     show_username_prompt: bool, // Added to control username prompt visibility
     username_file_path: Option<PathBuf>, // Added for instance-specific username file path
     is_loading: bool, // Added to show a loader until identity is confirmed
+    settings_state: SettingsState, // Added for settings panel UI state
     
     // IPC related fields
     rt: Arc<tokio::runtime::Runtime>,
@@ -232,6 +245,7 @@ impl ChatApp {
             show_username_prompt: initial_show_username_prompt, // Show prompt based on loaded status
             username_file_path: username_file_path_for_instance.clone(), // Store the passed path
             is_loading: !initial_show_username_prompt, // If username loaded, start in loading state, else prompt will show first
+            settings_state: SettingsState::new(), // Initialize settings state
             rt: rt_clone_for_app, 
             gui_to_daemon_tx: Some(gui_cmd_tx_clone_for_app), 
             daemon_to_gui_rx: daemon_to_gui_rx_arc,
@@ -500,7 +514,17 @@ impl eframe::App for ChatApp {
                     components::history::show(ui);
                 }
                 CurrentPanel::Settings => {
-                    components::settings::show(ui);
+                    components::settings::show(
+                        ui, 
+                        &mut self.settings_state,
+                        &mut self.current_user_id,
+                        &self.username_file_path,
+                        &self.gui_to_daemon_tx,
+                        &self.rt,
+                        &mut self.show_username_prompt,
+                        &mut self.is_loading,
+                        &mut self.peers
+                    );
                 }
             });
         }

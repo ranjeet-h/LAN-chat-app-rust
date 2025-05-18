@@ -240,34 +240,47 @@ fn send_message(
     if !message_input.trim().is_empty() {
         if let Some(recipient_id) = current_chat_peer_id.as_ref() {
             if !recipient_id.is_empty() { // Ensure a peer is actually selected
+                let content_to_send = message_input.trim().to_string();
+                message_input.clear(); // Clear input field immediately
+
                 let command = GuiToDaemonCommand::SendMessage {
                     recipient_id: recipient_id.clone(),
-                    content: message_input.trim().to_string(),
+                    content: content_to_send.clone(), // Use cloned content
                 };
+
+                // Add to local messages immediately with is_self = true
+                let new_message = Message {
+                    id: uuid::Uuid::new_v4().to_string(), // Generate unique ID
+                    sender: current_user_id.to_string(),    // Current user is the sender
+                    recipient: recipient_id.clone(),
+                    content: content_to_send.clone(), // Use cloned content
+                    timestamp: chrono::Utc::now(),
+                    is_self: true, // This message is from the current user
+                };
+                messages.push(new_message);
+                println!("GUI: Locally added self-message to chat area. Content: {}", content_to_send);
 
                 if let Some(tx) = gui_to_daemon_tx {
                     let tx_clone = tx.clone();
-                    let rt_clone = rt.clone();
-                    
-                    // Create a message object for the sent message and add it to messages vector
-                    let msg = Message {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        sender: current_user_id.to_string(),
-                        recipient: recipient_id.clone(),
-                        content: message_input.trim().to_string(),
-                        timestamp: chrono::Utc::now(),
-                        is_self: true,
-                    };
-                    messages.push(msg);
-                    
-                    rt_clone.spawn(async move {
+                    // let rt_clone = rt.clone(); // rt is Arc, cloning it like this is fine, or just use rt directly
+                    rt.spawn(async move {
+                        println!("GUI: Sending SendMessage command to daemon for content: {}", content_to_send);
                         if let Err(e) = tx_clone.send(command).await {
-                            eprintln!("GUI: Failed to send SendMessage command: {}", e);
+                            eprintln!("Failed to send SendMessage command: {}", e);
+                            // Optionally, update the local message to indicate failure or provide a retry mechanism
                         }
                     });
+                } else {
+                    eprintln!("Error: gui_to_daemon_tx is None, cannot send message.");
+                    // Message is already added locally, but won't be sent. Consider visual indication.
                 }
-                message_input.clear();
+            } else {
+                println!("GUI: SendMessage attempted but no recipient_id (peer not selected or empty).");
             }
+        } else {
+            println!("GUI: SendMessage attempted but no peer selected (current_chat_peer_id is None).");
         }
+    } else {
+        message_input.clear(); // Also clear if it was just whitespace
     }
 } 
